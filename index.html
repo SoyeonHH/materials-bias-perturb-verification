@@ -237,17 +237,6 @@ function saveToDisk(dataId, annotations, logs, annotatorId) {
 
 /* ─── DataLoader ─── */
 function DataLoader({ onLoad }) {
-  // Auto-load embedded data if available
-  useEffect(() => {
-    if (window.__EMBEDDED_DATA__) {
-      setLoadedData(window.__EMBEDDED_DATA__);
-      const id = getDataId(window.__EMBEDDED_DATA__);
-      const saved = loadSaved(id);
-      if (saved && Object.keys(saved.annotations || {}).length > 0) {
-        setSavedInfo({ ...saved, dataId: id, count: Object.keys(saved.annotations).filter(k => saved.annotations[k]).length });
-      }
-    }
-  }, []);
   const [name, setName] = useState("");
   const [err, setErr] = useState("");
   const [url, setUrl] = useState("");
@@ -256,6 +245,20 @@ function DataLoader({ onLoad }) {
   const [loadedData, setLoadedData] = useState(null);
   const dropRef = useRef(null);
   const fileRef = useRef(null);
+
+  // Auto-load: embedded data → same-origin JSON fetch
+  useEffect(() => {
+    if (window.__EMBEDDED_DATA__) {
+      processData(window.__EMBEDDED_DATA__, "embedded");
+      return;
+    }
+    // Try fetching annotation_data.json from same directory
+    setLoading(true);
+    fetch("annotation_data.json")
+      .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(d => { processData(d, "auto"); setLoading(false); })
+      .catch(() => { setLoading(false); }); // silent fail — user can upload manually
+  }, []);
 
   const processData = (raw, source) => {
     try {
@@ -314,26 +317,40 @@ function DataLoader({ onLoad }) {
           <input placeholder="예: 홍길동" value={name} onChange={e => setName(e.target.value)} />
         </div>
 
-        <div className="loader-field">
-          <label>Annotation 데이터 (JSON)</label>
-          <div
-            ref={dropRef}
-            className="loader-drop"
-            onClick={() => fileRef.current?.click()}
-            onDragOver={e => { e.preventDefault(); e.currentTarget.classList.add("drag"); }}
-            onDragLeave={e => e.currentTarget.classList.remove("drag")}
-            onDrop={e => { e.preventDefault(); e.currentTarget.classList.remove("drag"); handleFile(e.dataTransfer.files[0]); }}
-          >
-            <div className="icon">📂</div>
-            <p>{loading ? "로딩 중..." : loadedData ? `✅ ${loadedData.length}개 샘플 로드됨` : "JSON 파일을 드래그하거나 클릭하여 업로드"}</p>
-            <input ref={fileRef} type="file" accept=".json" hidden onChange={e => handleFile(e.target.files[0])} />
+        {loadedData ? (
+          <div className="loader-field">
+            <div style={{padding:"14px",background:"#ecfdf5",border:"1px solid #a7f3d0",borderRadius:"8px",fontSize:"13px",color:"#065f46"}}>
+              ✅ {loadedData.length}개 샘플, {loadedData.reduce((s,d)=>s+d.changes.length,0)}개 변경사항 로드됨
+            </div>
           </div>
-          <div className="loader-or">— 또는 URL로 로드 —</div>
-          <div className="loader-url">
-            <input placeholder="https://...annotation_data.json" value={url} onChange={e => setUrl(e.target.value)} />
-            <button onClick={handleUrl} disabled={loading}>로드</button>
+        ) : (
+          <div className="loader-field">
+            <label>Annotation 데이터 (JSON)</label>
+            {loading ? (
+              <div style={{padding:"14px",textAlign:"center",color:"#888",fontSize:"12px"}}>데이터 로딩 중...</div>
+            ) : (
+              <>
+                <div
+                  ref={dropRef}
+                  className="loader-drop"
+                  onClick={() => fileRef.current?.click()}
+                  onDragOver={e => { e.preventDefault(); e.currentTarget.classList.add("drag"); }}
+                  onDragLeave={e => e.currentTarget.classList.remove("drag")}
+                  onDrop={e => { e.preventDefault(); e.currentTarget.classList.remove("drag"); handleFile(e.dataTransfer.files[0]); }}
+                >
+                  <div className="icon">📂</div>
+                  <p>JSON 파일을 드래그하거나 클릭하여 업로드</p>
+                  <input ref={fileRef} type="file" accept=".json" hidden onChange={e => handleFile(e.target.files[0])} />
+                </div>
+                <div className="loader-or">— 또는 URL로 로드 —</div>
+                <div className="loader-url">
+                  <input placeholder="https://...annotation_data.json" value={url} onChange={e => setUrl(e.target.value)} />
+                  <button onClick={handleUrl} disabled={loading}>로드</button>
+                </div>
+              </>
+            )}
           </div>
-        </div>
+        )}
 
         {err && <div className="loader-err">{err}</div>}
 
