@@ -214,6 +214,20 @@ const VERDICT_STYLES = {
 const EP_Q = "이 변경이 합성 레시피에 과학적 오류를 만드는가?";
 const RP_Q = "이 표현 변환이 동일한 물질/개념을 가리키는가?";
 
+/* ─── Seeded shuffle ─── */
+function seededShuffle(arr, seed) {
+  const a = arr.slice();
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) { h = ((h << 5) - h + seed.charCodeAt(i)) | 0; }
+  let s = Math.abs(h) || 1;
+  const rand = () => { s = (s * 16807) % 2147483647; return (s - 1) / 2147483646; };
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
 /* ─── Storage helpers ─── */
 function getDataId(data) {
   const s = data.map(d => d.sample_id + "|" + d.perturbation_type).join(",");
@@ -265,6 +279,7 @@ function DataLoader({ onLoad }) {
       const data = typeof raw === "string" ? JSON.parse(raw) : raw;
       if (!Array.isArray(data) || data.length === 0) throw new Error("빈 배열");
       if (!data[0].segments || !data[0].changes) throw new Error("segments/changes 필드 없음");
+      data.forEach((d, i) => { d._origIdx = i; });
       setLoadedData(data);
       setErr("");
       const id = getDataId(data);
@@ -298,7 +313,7 @@ function DataLoader({ onLoad }) {
     const dataId = getDataId(loadedData);
     const saved = resumeSaved && savedInfo ? savedInfo : null;
     onLoad({
-      data: loadedData,
+      data: seededShuffle(loadedData, name.trim()),
       annotatorId: name.trim(),
       dataId,
       resumeAnnotations: saved ? saved.annotations : {},
@@ -604,7 +619,7 @@ function App() {
         const sample = appData.data[sampleIdx];
         if (!sample) return;
         const verdict = (key === "O" || key === "ㅐ") ? "O" : "X";
-        const firstUndone = sample.changes.findIndex((_, ci) => !annotations[`${sampleIdx}-${ci}`]);
+        const firstUndone = sample.changes.findIndex((_, ci) => !annotations[`${sample._origIdx}-${ci}`]);
         if (firstUndone >= 0) {
           handleAnnotate(firstUndone, verdict);
         }
@@ -624,11 +639,11 @@ function App() {
 
   /* ─ Annotation handler ─ */
   const handleAnnotate = (ci, val) => {
-    const key = `${sampleIdx}-${ci}`;
+    const sample = appData.data[sampleIdx];
+    const key = `${sample._origIdx}-${ci}`;
     const prev = annotations[key];
     const next = prev === val ? undefined : val;
     setAnnotations(a => ({ ...a, [key]: next }));
-    const sample = appData.data[sampleIdx];
     const newLog = addLog(logs, "annotate", {
       sample_idx: sampleIdx,
       sample_id: sample.sample_id,
@@ -648,22 +663,22 @@ function App() {
   };
 
   /* ─ Getters ─ */
-  const getKey = (si, ci) => `${si}-${ci}`;
   const data = appData?.data || [];
   const sample = data[sampleIdx];
+  const getKey = (s, ci) => `${s._origIdx}-${ci}`;
   const category = sample?.perturbation_category || "error";
   const isEP = category === "error";
 
   const sampleAnnotations = useMemo(() => {
     if (!sample) return {};
     const r = {};
-    sample.changes.forEach((_, ci) => { const v = annotations[getKey(sampleIdx, ci)]; if (v) r[ci] = v; });
+    sample.changes.forEach((_, ci) => { const v = annotations[getKey(sample, ci)]; if (v) r[ci] = v; });
     return r;
   }, [sample, sampleIdx, annotations]);
 
   const totalChanges = data.reduce((s, d) => s + d.changes.length, 0);
   const doneCount = Object.values(annotations).filter(Boolean).length;
-  const sampleDone = sample ? sample.changes.filter((_, ci) => annotations[getKey(sampleIdx, ci)]).length : 0;
+  const sampleDone = sample ? sample.changes.filter((_, ci) => annotations[getKey(sample, ci)]).length : 0;
 
   /* ─ Export ─ */
   const buildExport = () => {
@@ -686,7 +701,7 @@ function App() {
           replacement: c.replacement,
           source_type: c.source_type,
           lookup_source: c.lookup_source || null,
-          verdict: annotations[getKey(si, ci)] || null,
+          verdict: annotations[getKey(s, ci)] || null,
           is_gold: c.is_gold || false,
         })),
       })),
@@ -779,7 +794,7 @@ function App() {
         <div className="sample-nav">
           <div className="nav-label">Samples</div>
           {data.map((s, i) => {
-            const d = s.changes.filter((_, ci) => annotations[getKey(i, ci)]).length;
+            const d = s.changes.filter((_, ci) => annotations[getKey(s, ci)]).length;
             const p = Math.round((d / s.changes.length) * 100);
             const isCatEP = s.perturbation_category === "error";
             return (
