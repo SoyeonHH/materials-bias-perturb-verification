@@ -214,12 +214,11 @@ const DOMAIN_COLORS = {
 };
 
 const VERDICT_STYLES = {
-  O: { bg:"#059669", label_ep:"O 오류 맞음", label_rp:"O 유사 (같은 물질)" },
-  X: { bg:"#dc2626", label_ep:"X 오류 아님", label_rp:"X 다름 (다른 물질)" },
+  O: { bg:"#dc2626", label:"O Yes — 문제 있음" },
+  X: { bg:"#059669", label:"X No — 문제 없음" },
 };
 
-const EP_Q = "이 변경이 합성 레시피에 과학적 오류를 만드는가?";
-const RP_Q = "변환된 표현이 원래 물질과 같은 것을 가리키는가?";
+const QUESTION = "이 변경이 레시피에 과학적 문제를 일으키는가?";
 
 /* ─── Seeded shuffle ─── */
 function seededShuffle(arr, seed) {
@@ -476,15 +475,14 @@ function DataLoader({ onLoad }) {
 }
 
 /* ─── Gold Tutorial ─── */
-function GoldTutorial({ goldItems, category, onComplete }) {
+function GoldTutorial({ goldItems, onComplete }) {
   const [idx, setIdx] = useState(0);
   if (!goldItems || goldItems.length === 0) { onComplete(); return null; }
   const item = goldItems[idx];
-  const isEP = category === "error";
   return (
     <div className="gold-bg">
       <div className="gold-card">
-        <h2>{isEP ? "Error" : "Representation"} — 판단 기준 예시</h2>
+        <h2>판단 기준 예시</h2>
         <div className="gold-sub">아래 예시를 확인한 후 본 평가를 시작합니다. ({idx+1}/{goldItems.length})</div>
 
         {goldItems.map((g, gi) => (
@@ -501,7 +499,7 @@ function GoldTutorial({ goldItems, category, onComplete }) {
             <div className="gi-answer">
               정답:
               <span className={g.gold_verdict === "O" ? "badge-o" : "badge-x"}>{g.gold_verdict}</span>
-              {isEP ? (g.gold_verdict === "O" ? "오류 맞음" : "오류 아님") : (g.gold_verdict === "O" ? "유사한 표현 (같은 물질)" : "다른 물질 (잘못된 변환)")}
+              {g.gold_verdict === "O" ? "문제 있음" : "문제 없음"}
             </div>
             <div className="gi-reason">{g.gold_reason}</div>
           </div>
@@ -516,11 +514,9 @@ function GoldTutorial({ goldItems, category, onComplete }) {
 }
 
 /* ─── Popover ─── */
-function Popover({ change, changeIdx, annotation, category, onAnnotate, onClose, anchorRect }) {
+function Popover({ change, changeIdx, annotation, onAnnotate, onClose, anchorRect }) {
   const ref = useRef(null);
   const tc = TYPE_COLORS[change.source_type] || TYPE_COLORS.numerical_perturbation;
-  const isEP = category === "error";
-  const question = isEP ? EP_Q : RP_Q;
 
   useEffect(() => {
     const h = (e) => { if (ref.current && !ref.current.contains(e.target)) onClose(); };
@@ -560,7 +556,7 @@ function Popover({ change, changeIdx, annotation, category, onAnnotate, onClose,
           {change.lookup_source && <span>출처: {change.lookup_source}</span>}
         </div>
       )}
-      <div className="pop-question">{question}</div>
+      <div className="pop-question">{QUESTION}</div>
       <div className="pop-buttons">
         {["O", "X"].map(v => (
           <button
@@ -569,7 +565,7 @@ function Popover({ change, changeIdx, annotation, category, onAnnotate, onClose,
             style={annotation === v ? { background: VERDICT_STYLES[v].bg, color:"#fff", borderColor: VERDICT_STYLES[v].bg } : {}}
             onClick={() => onAnnotate(v)}
           >
-            {isEP ? VERDICT_STYLES[v].label_ep : VERDICT_STYLES[v].label_rp}
+            {VERDICT_STYLES[v].label}
           </button>
         ))}
       </div>
@@ -578,7 +574,7 @@ function Popover({ change, changeIdx, annotation, category, onAnnotate, onClose,
 }
 
 /* ─── RecipeView ─── */
-function RecipeView({ segments, changes, annotations, category, onAnnotate }) {
+function RecipeView({ segments, changes, annotations, onAnnotate }) {
   const [activeChange, setActiveChange] = useState(null);
   const [anchorRect, setAnchorRect] = useState(null);
 
@@ -611,7 +607,6 @@ function RecipeView({ segments, changes, annotations, category, onAnnotate }) {
           change={changes[activeChange]}
           changeIdx={activeChange}
           annotation={annotations[activeChange]}
-          category={category}
           onAnnotate={v => onAnnotate(activeChange, v)}
           onClose={() => setActiveChange(null)}
           anchorRect={anchorRect}
@@ -622,8 +617,7 @@ function RecipeView({ segments, changes, annotations, category, onAnnotate }) {
 }
 
 /* ─── ChangeList ─── */
-function ChangeList({ changes, annotations, category, onAnnotate, displayOrder }) {
-  const isEP = category === "error";
+function ChangeList({ changes, annotations, onAnnotate, displayOrder }) {
   const order = displayOrder || changes.map((_, i) => i);
   return (
     <div className="change-list">
@@ -650,7 +644,7 @@ function ChangeList({ changes, annotations, category, onAnnotate, displayOrder }
                 {["O","X"].map(v => (
                   <button key={v} className={`cl-quick-btn btn-${v.toLowerCase()}`}
                     onClick={e => { e.stopPropagation(); onAnnotate(idx, v); }}>
-                    {v === "O" ? "⭕" : "❌"} {isEP ? VERDICT_STYLES[v].label_ep.slice(2) : VERDICT_STYLES[v].label_rp.slice(2)}
+                    {v === "O" ? "⭕" : "❌"} {VERDICT_STYLES[v].label.slice(2)}
                   </button>
                 ))}
               </div>
@@ -846,7 +840,6 @@ function App() {
     return (
       <GoldTutorial
         goldItems={goldItemsForCategory.items}
-        category={goldItemsForCategory.category}
         onComplete={() => setGoldDone(prev => ({ ...prev, [goldItemsForCategory.category]: true }))}
       />
     );
@@ -883,8 +876,6 @@ function App() {
       {/* CONTEXT BAR */}
       <div className="context-bar">
         <span className="ctx-material" title={sample.material}>{sample.material}</span>
-        <span className={`ctx-tag ${isEP ? "cat-error" : "cat-repr"}`}>{isEP ? "Error" : "Representation"}</span>
-        <span className="ctx-tag">{sample.perturbation_type?.replace(/_/g," ").replace("all error perturbation","error").replace("llm representational perturbation","representation")}</span>
         <span className="ctx-tag">{sample.process}</span>
         <span className="ctx-tag" style={(()=>{ const dc = DOMAIN_COLORS[sample.domain] || DOMAIN_COLORS.Others; return {background:dc.bg,color:dc.text,border:`1px solid ${dc.border}`}; })()}>{sample.domain}</span>
         <span className="ctx-changes"><strong>{sampleDone}</strong> / {sample.changes.length} annotated</span>
@@ -901,14 +892,10 @@ function App() {
           {data.map((s, i) => {
             const d = s.changes.filter((_, ci) => annotations[getKey(s, ci)]).length;
             const p = Math.round((d / s.changes.length) * 100);
-            const isCatEP = s.perturbation_category === "error";
             return (
               <div key={i} className={`nav-item ${i === sampleIdx ? "active" : ""}`} onClick={() => handleNavigate(i)}>
                 <div className="nav-item-top">
                   <span className="nav-id">#{s.sample_id}</span>
-                  <span className="nav-file" style={isCatEP ? {background:"#fef2f2",color:"#991b1b"} : {background:"#eff6ff",color:"#1e40af"}}>
-                    {s.perturbation_type?.replace(/_/g," ").replace("all error perturbation","error").replace("llm representational perturbation","representation")}
-                  </span>
                 </div>
                 <div className="nav-mat">{s.material}</div>
                 {s.domain && <span className="ctx-tag" style={(()=>{ const dc = DOMAIN_COLORS[s.domain] || DOMAIN_COLORS.Others; return {background:dc.bg,color:dc.text,border:`1px solid ${dc.border}`,fontSize:"9px",padding:"1px 5px",marginTop:"3px",display:"inline-block"}; })()}>{s.domain}</span>}
@@ -945,7 +932,6 @@ function App() {
             segments={sample.segments}
             changes={sample.changes}
             annotations={sampleAnnotations}
-            category={category}
             onAnnotate={handleAnnotate}
           />
         </div>
@@ -953,17 +939,15 @@ function App() {
         {/* RIGHT PANEL */}
         <div className="right-panel">
           <div className="question-box">
-            <div className="q-label">{isEP ? "Error" : "Representation"}</div>
-            <div className="q-text">{isEP ? EP_Q : RP_Q}</div>
+            <div className="q-text">{QUESTION}</div>
             <div className="q-legend">
-              <span style={{color:"#059669"}}>O = {isEP ? "오류 맞음 (과학적 오류가 발생)" : "유사 (같은 물질의 다른 표현)"}</span>
-              <span style={{color:"#dc2626"}}>X = {isEP ? "오류 아님 (문제없는 변경)" : "다름 (다른 물질이거나 잘못된 변환)"}</span>
+              <span style={{color:"#dc2626"}}>O = Yes, 문제 있음 (과학적 타당성 훼손)</span>
+              <span style={{color:"#059669"}}>X = No, 문제 없음 (타당성 유지)</span>
             </div>
           </div>
           <ChangeList
             changes={sample.changes}
             annotations={sampleAnnotations}
-            category={category}
             onAnnotate={handleAnnotate}
             displayOrder={sample._displayOrder}
           />
@@ -1010,8 +994,8 @@ function App() {
 
       {/* KEYBOARD HINT */}
       <div className="kbd-hint">
-        <span><kbd>O</kbd> 오류맞음/유사</span>
-        <span><kbd>X</kbd> 오류아님/다름</span>
+        <span><kbd>O</kbd> Yes (문제 있음)</span>
+        <span><kbd>X</kbd> No (문제 없음)</span>
         <span><kbd>←</kbd><kbd>→</kbd> 샘플 이동</span>
       </div>
     </div>
