@@ -484,7 +484,7 @@ function GoldTutorial({ goldItems, category, onComplete }) {
   return (
     <div className="gold-bg">
       <div className="gold-card">
-        <h2>{isEP ? "Error Perturbation" : "Representational Perturbation"} — 판단 기준 예시</h2>
+        <h2>{isEP ? "Error" : "Representation"} — 판단 기준 예시</h2>
         <div className="gold-sub">아래 예시를 확인한 후 본 평가를 시작합니다. ({idx+1}/{goldItems.length})</div>
 
         {goldItems.map((g, gi) => (
@@ -884,7 +884,7 @@ function App() {
       <div className="context-bar">
         <span className="ctx-material" title={sample.material}>{sample.material}</span>
         <span className={`ctx-tag ${isEP ? "cat-error" : "cat-repr"}`}>{isEP ? "Error" : "Representation"}</span>
-        <span className="ctx-tag">{sample.perturbation_type}</span>
+        <span className="ctx-tag">{sample.perturbation_type?.replace(/_/g," ").replace("all error perturbation","error").replace("llm representational perturbation","representation")}</span>
         <span className="ctx-tag">{sample.process}</span>
         <span className="ctx-tag" style={(()=>{ const dc = DOMAIN_COLORS[sample.domain] || DOMAIN_COLORS.Others; return {background:dc.bg,color:dc.text,border:`1px solid ${dc.border}`}; })()}>{sample.domain}</span>
         <span className="ctx-changes"><strong>{sampleDone}</strong> / {sample.changes.length} annotated</span>
@@ -907,7 +907,7 @@ function App() {
                 <div className="nav-item-top">
                   <span className="nav-id">#{s.sample_id}</span>
                   <span className="nav-file" style={isCatEP ? {background:"#fef2f2",color:"#991b1b"} : {background:"#eff6ff",color:"#1e40af"}}>
-                    {s.perturbation_type?.replace(/_/g," ").replace("llm ","").slice(0,12)}
+                    {s.perturbation_type?.replace(/_/g," ").replace("all error perturbation","error").replace("llm representational perturbation","representation")}
                   </span>
                 </div>
                 <div className="nav-mat">{s.material}</div>
@@ -953,7 +953,7 @@ function App() {
         {/* RIGHT PANEL */}
         <div className="right-panel">
           <div className="question-box">
-            <div className="q-label">{isEP ? "Error Perturbation" : "Representational Perturbation"}</div>
+            <div className="q-label">{isEP ? "Error" : "Representation"}</div>
             <div className="q-text">{isEP ? EP_Q : RP_Q}</div>
             <div className="q-legend">
               <span style={{color:"#059669"}}>O = {isEP ? "오류 맞음 (과학적 오류가 발생)" : "유사 (같은 물질의 다른 표현)"}</span>
