@@ -287,6 +287,35 @@ function DataLoader({ onLoad }) {
       data = data.filter(d => d.changes.length > 0);
       data.forEach((d, i) => { d._origIdx = i; });
 
+      // Fix segment alignment: rebuild segments by searching for each
+      // replacement in the perturbed text (case-insensitive, cursor-based).
+      data.forEach(d => {
+        const fullText = d.segments.map(s => s.content).join('');
+        const fullLower = fullText.toLowerCase();
+        const sorted = d.changes.map((ch, i) => ({ ...ch, _idx: i }))
+          .filter(ch => ch.position != null && ch.position >= 0)
+          .sort((a, b) => a.position - b.position);
+        if (sorted.length === 0) return;
+        const newSegs = [];
+        let cursor = 0;
+        for (const ch of sorted) {
+          const rep = ch.replacement;
+          const repLower = rep.toLowerCase();
+          // Search: exact from cursor → case-insensitive from cursor → exact from 0 → case-insensitive from 0
+          let idx = fullText.indexOf(rep, cursor);
+          if (idx < 0) idx = fullLower.indexOf(repLower, cursor);
+          if (idx < 0) idx = fullText.indexOf(rep);
+          if (idx < 0) idx = fullLower.indexOf(repLower);
+          if (idx < 0) continue; // replacement not in text (data issue), skip
+          if (idx > cursor) newSegs.push({ type: 'text', content: fullText.slice(cursor, idx) });
+          const end = idx + rep.length;
+          newSegs.push({ type: 'change', content: fullText.slice(idx, end), change_idx: ch._idx });
+          cursor = end;
+        }
+        if (cursor < fullText.length) newSegs.push({ type: 'text', content: fullText.slice(cursor) });
+        d.segments = newSegs;
+      });
+
       // Generate decoy changes for attention verification
       // Group samples by perturbation_type for cross-sample fallback
       const byType = {};
@@ -298,12 +327,7 @@ function DataLoader({ onLoad }) {
         const isError = d.perturbation_category === "error";
         const origLen = d.changes.length;
         const decoys = [];
-        if (isError) {
-          // EP decoy: swap original ↔ replacement (error correction → not an error)
-          d.changes.forEach(ch => {
-            decoys.push({ original: ch.replacement, replacement: ch.original, source_type: ch.source_type, _isDecoy: true });
-          });
-        } else {
+        if (!isError) {
           // RP decoy: pair with a different change's replacement (different substance)
           // Must ensure decoy replacement refers to a DIFFERENT substance than ch.original
           const half = Math.ceil(origLen / 2);
@@ -749,6 +773,8 @@ function App() {
   const totalChanges = data.reduce((s, d) => s + d.changes.length, 0);
   const doneCount = Object.values(annotations).filter(Boolean).length;
   const sampleDone = sample ? sample.changes.filter((_, ci) => annotations[getKey(sample, ci)]).length : 0;
+  const totalSamples = data.length;
+  const doneSamples = data.filter(s => s.changes.every((_, ci) => annotations[getKey(s, ci)])).length;
 
   /* ─ Export ─ */
   const buildExport = () => {
@@ -835,14 +861,22 @@ function App() {
         <span className="topbar-title">Perturbation Verification</span>
         <div className="topbar-progress">
           <div className="topbar-bar">
-            <div className="topbar-fill" style={{ width: `${totalChanges ? (doneCount/totalChanges*100) : 0}%` }} />
+            <div className="topbar-fill" style={{ width: `${totalSamples ? (doneSamples/totalSamples*100) : 0}%` }} />
           </div>
-          <span className="topbar-pct">{doneCount}/{totalChanges}</span>
+          <span className="topbar-pct">{doneSamples}/{totalSamples} 샘플</span>
         </div>
         <div className="topbar-right">
           <span className="topbar-user">{appData.annotatorId}</span>
           <button className="topbar-btn secondary" onClick={() => { saveToDisk(appData.dataId, annotations, logs, appData.annotatorId); alert("저장 완료"); }}>저장</button>
-          <button className="topbar-btn" onClick={() => { addLog(logs, "export_open", {}); setShowExport(true); }}>Export</button>
+          <button className="topbar-btn" onClick={() => {
+            const incompleteIdx = data.findIndex(s => s.changes.some((_, ci) => !annotations[getKey(s, ci)]));
+            if (incompleteIdx >= 0) {
+              handleNavigate(incompleteIdx);
+              alert(`미완료 샘플이 있습니다. (#${data[incompleteIdx].sample_id})`);
+            } else {
+              addLog(logs, "export_open", {}); setShowExport(true);
+            }
+          }}>Export</button>
         </div>
       </div>
 
@@ -953,7 +987,7 @@ function App() {
           <div className="modal-box" onClick={e => e.stopPropagation()}>
             <h3>Export</h3>
             <p style={{ fontSize:12, color:"#666", marginBottom:8 }}>
-              {appData.annotatorId} · {doneCount}/{totalChanges} 완료 · 로그 {logs.length}건
+              {appData.annotatorId} · {doneSamples}/{totalSamples} 샘플 완료 · 로그 {logs.length}건
             </p>
             <div className="modal-tabs">
               <div className={`modal-tab ${exportTab === "annotations" ? "active" : ""}`} onClick={() => setExportTab("annotations")}>Annotations</div>
