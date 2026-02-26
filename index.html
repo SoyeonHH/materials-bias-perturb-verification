@@ -305,18 +305,34 @@ function DataLoader({ onLoad }) {
           });
         } else {
           // RP decoy: pair with a different change's replacement (different substance)
+          // Must ensure decoy replacement refers to a DIFFERENT substance than ch.original
           const half = Math.ceil(origLen / 2);
           d.changes.forEach((ch, i) => {
             let otherReplacement = null;
+            // Try cross-pair: compare originals to ensure different compound
             const otherIdx = (i + half) % origLen;
-            if (origLen > 1 && d.changes[otherIdx].replacement !== ch.replacement) {
+            if (origLen > 1 && d.changes[otherIdx].original !== ch.original) {
               otherReplacement = d.changes[otherIdx].replacement;
-            } else {
-              // Fallback: find replacement from another sample of same type
-              const siblings = (byType[d.perturbation_type] || []).filter(s => s !== d && s.changes.length > 0);
-              if (siblings.length > 0) {
-                const sib = siblings[i % siblings.length];
-                otherReplacement = sib.changes[i % sib.changes.length].replacement;
+            }
+            // Fallback: try other indices in same sample
+            if (!otherReplacement) {
+              for (let k = 1; k < origLen; k++) {
+                const tryIdx = (i + k) % origLen;
+                if (d.changes[tryIdx].original !== ch.original) {
+                  otherReplacement = d.changes[tryIdx].replacement;
+                  break;
+                }
+              }
+            }
+            // Fallback: find from another sample of same type (filter out decoys)
+            if (!otherReplacement) {
+              const siblings = (byType[d.perturbation_type] || []).filter(s => s !== d);
+              for (let k = 0; k < siblings.length && !otherReplacement; k++) {
+                const sib = siblings[(i + k) % siblings.length];
+                const sibOrig = sib.changes.filter(c => !c._isDecoy && c.original !== ch.original);
+                if (sibOrig.length > 0) {
+                  otherReplacement = sibOrig[i % sibOrig.length].replacement;
+                }
               }
             }
             if (otherReplacement && otherReplacement !== ch.original) {
