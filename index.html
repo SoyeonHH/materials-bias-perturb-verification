@@ -115,7 +115,7 @@ body{font-family:'Noto Sans KR',-apple-system,sans-serif;background:#fafaf8;colo
 .cl-title{font-size:11px;font-weight:700;padding:6px 8px;color:#666;border-bottom:1px solid #eee;margin-bottom:6px}
 .cl-item{padding:8px 10px;border-radius:7px;margin-bottom:4px;border:1px solid #eee;cursor:pointer;transition:all .12s}
 .cl-item:hover{background:#f9f8f5}
-.cl-done{opacity:.55}
+.cl-done{opacity:.75}
 .cl-item-top{display:flex;align-items:center;gap:6px;margin-bottom:4px}
 .cl-idx{font-size:10px;font-weight:700;color:#999}
 .cl-badge{padding:1px 6px;border-radius:3px;font-weight:600;font-size:10px}
@@ -287,32 +287,78 @@ function DataLoader({ onLoad }) {
       data.forEach((d, i) => { d._origIdx = i; });
 
       // Fix segment alignment: rebuild segments by searching for each
-      // replacement in the perturbed text (case-insensitive, cursor-based).
+      // replacement in the perturbed text. Uses ALL occurrences of each
+      // replacement to guarantee every change gets a highlight.
       data.forEach(d => {
         const fullText = d.segments.map(s => s.content).join('');
         const fullLower = fullText.toLowerCase();
         const sorted = d.changes.map((ch, i) => ({ ...ch, _idx: i }))
           .filter(ch => ch.position != null && ch.position >= 0)
           .sort((a, b) => a.position - b.position);
-        if (sorted.length === 0) return;
-        const newSegs = [];
-        let cursor = 0;
+        if (sorted.length === 0) {
+          // No position data — keep original segments, mark existing change segments as highlighted
+          const highlightedSet = new Set();
+          d.segments.forEach(seg => { if (seg.type === 'change' && seg.change_idx != null) highlightedSet.add(seg.change_idx); });
+          d._highlightedChanges = highlightedSet;
+          return;
+        }
+
+        // Find ALL occurrences for each replacement, then greedily assign
+        // each change to the best (closest to cursor) unused occurrence.
+        const allOccurrences = []; // { start, end, changeIdx }
+        const used = new Set(); // track used text positions
         for (const ch of sorted) {
           const rep = ch.replacement;
           const repLower = rep.toLowerCase();
-          // Search: exact from cursor → case-insensitive from cursor → exact from 0 → case-insensitive from 0
-          let idx = fullText.indexOf(rep, cursor);
-          if (idx < 0) idx = fullLower.indexOf(repLower, cursor);
-          if (idx < 0) idx = fullText.indexOf(rep);
-          if (idx < 0) idx = fullLower.indexOf(repLower);
-          if (idx < 0) continue; // replacement not in text (data issue), skip
-          if (idx > cursor) newSegs.push({ type: 'text', content: fullText.slice(cursor, idx) });
-          const end = idx + rep.length;
-          newSegs.push({ type: 'change', content: fullText.slice(idx, end), change_idx: ch._idx });
-          cursor = end;
+          // Collect all positions of this replacement in text
+          const positions = [];
+          let searchFrom = 0;
+          while (true) {
+            let idx = fullText.indexOf(rep, searchFrom);
+            if (idx >= 0) { positions.push({ pos: idx, exact: true }); searchFrom = idx + 1; continue; }
+            break;
+          }
+          // Also case-insensitive positions
+          searchFrom = 0;
+          while (true) {
+            let idx = fullLower.indexOf(repLower, searchFrom);
+            if (idx >= 0) {
+              if (!positions.some(p => p.pos === idx)) positions.push({ pos: idx, exact: false });
+              searchFrom = idx + 1; continue;
+            }
+            break;
+          }
+          // Pick the best unused position (prefer exact, closest to position hint)
+          positions.sort((a, b) => {
+            if (a.exact !== b.exact) return a.exact ? -1 : 1;
+            return Math.abs(a.pos - (ch.position || 0)) - Math.abs(b.pos - (ch.position || 0));
+          });
+          let picked = null;
+          for (const p of positions) {
+            const key = `${p.pos}-${p.pos + rep.length}`;
+            if (!used.has(key)) { picked = p; used.add(key); break; }
+          }
+          if (picked != null) {
+            allOccurrences.push({ start: picked.pos, end: picked.pos + rep.length, changeIdx: ch._idx });
+          }
+        }
+
+        // Sort by position and build segments
+        allOccurrences.sort((a, b) => a.start - b.start);
+        const newSegs = [];
+        let cursor = 0;
+        for (const occ of allOccurrences) {
+          if (occ.start < cursor) continue; // overlapping, skip
+          if (occ.start > cursor) newSegs.push({ type: 'text', content: fullText.slice(cursor, occ.start) });
+          newSegs.push({ type: 'change', content: fullText.slice(occ.start, occ.end), change_idx: occ.changeIdx });
+          cursor = occ.end;
         }
         if (cursor < fullText.length) newSegs.push({ type: 'text', content: fullText.slice(cursor) });
         d.segments = newSegs;
+
+        // Track which change indices got a highlight
+        const highlightedSet = new Set(allOccurrences.map(o => o.changeIdx));
+        d._highlightedChanges = highlightedSet;
       });
 
       // Generate decoy changes for attention verification
@@ -364,9 +410,18 @@ function DataLoader({ onLoad }) {
           });
         }
         d.changes.push(...decoys);
-        // Create shuffled display order seeded by sample_id
-        const indices = Array.from({ length: d.changes.length }, (_, i) => i);
-        d._displayOrder = seededShuffle(indices, String(d.sample_id || d._origIdx));
+
+        // Filter change list to only include changes that have highlights
+        // (decoys and unmatched changes are excluded from display).
+        // Keep original indices intact by building a filtered display order.
+        const highlightedSet = d._highlightedChanges || new Set();
+        // For decoys, they don't have highlights, so they are excluded.
+        // Build display order from only highlighted change indices.
+        const visibleIndices = [];
+        for (let i = 0; i < d.changes.length; i++) {
+          if (highlightedSet.has(i)) visibleIndices.push(i);
+        }
+        d._displayOrder = seededShuffle(visibleIndices, String(d.sample_id || d._origIdx));
       });
 
       setLoadedData(data);
@@ -424,7 +479,7 @@ function DataLoader({ onLoad }) {
         {loadedData ? (
           <div className="loader-field">
             <div style={{padding:"14px",background:"#ecfdf5",border:"1px solid #a7f3d0",borderRadius:"8px",fontSize:"13px",color:"#065f46"}}>
-              ✅ {loadedData.length}개 샘플, {loadedData.reduce((s,d)=>s+d.changes.length,0)}개 변경사항 로드됨
+              ✅ {loadedData.length}개 샘플, {loadedData.reduce((s,d)=>s+(d._displayOrder||d.changes.map((_,i)=>i)).length,0)}개 변경사항 로드됨
             </div>
           </div>
         ) : (
@@ -574,9 +629,23 @@ function Popover({ change, changeIdx, annotation, onAnnotate, onClose, anchorRec
 }
 
 /* ─── RecipeView ─── */
-function RecipeView({ segments, changes, annotations, onAnnotate }) {
+function RecipeView({ segments, changes, annotations, onAnnotate, focusedChange, onFocusChange }) {
   const [activeChange, setActiveChange] = useState(null);
   const [anchorRect, setAnchorRect] = useState(null);
+
+  // Reset active state when sample changes
+  useEffect(() => { setActiveChange(null); setAnchorRect(null); }, [segments]);
+
+  // Scroll to highlight when focusedChange changes (from change list click)
+  useEffect(() => {
+    if (focusedChange == null) return;
+    const el = document.querySelector(`[data-change-idx="${focusedChange}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setActiveChange(focusedChange);
+      setAnchorRect(el.getBoundingClientRect());
+    }
+  }, [focusedChange]);
 
   return (
     <div className="recipe-view">
@@ -591,9 +660,10 @@ function RecipeView({ segments, changes, annotations, onAnnotate }) {
           return (
             <span
               key={i}
+              data-change-idx={ci}
               className={`highlight ${activeChange === ci ? "highlight-active" : ""}`}
               style={{ backgroundColor: tc.bg, borderBottom: `2px solid ${tc.border}` }}
-              onClick={e => { setAnchorRect(e.target.getBoundingClientRect()); setActiveChange(activeChange === ci ? null : ci); }}
+              onClick={e => { setAnchorRect(e.target.getBoundingClientRect()); setActiveChange(activeChange === ci ? null : ci); if (onFocusChange) onFocusChange(null); }}
               title={`${ch.original} → ${ch.replacement}`}
             >
               {seg.content}
@@ -617,18 +687,19 @@ function RecipeView({ segments, changes, annotations, onAnnotate }) {
 }
 
 /* ─── ChangeList ─── */
-function ChangeList({ changes, annotations, onAnnotate, displayOrder }) {
+function ChangeList({ changes, annotations, onAnnotate, displayOrder, onClickChange }) {
   const order = displayOrder || changes.map((_, i) => i);
   return (
     <div className="change-list">
-      <div className="cl-title">변경 목록 ({changes.length})</div>
+      <div className="cl-title">변경 목록 ({order.length})</div>
       {order.map((idx, dispIdx) => {
         const ch = changes[idx];
         if (!ch) return null;
         const tc = TYPE_COLORS[ch.source_type] || TYPE_COLORS.numerical_perturbation;
         const ann = annotations[idx];
         return (
-          <div key={idx} className={`cl-item ${ann ? "cl-done" : ""}`}>
+          <div key={idx} className={`cl-item ${ann ? "cl-done" : ""}`}
+            onClick={() => onClickChange && onClickChange(idx)}>
             <div className="cl-item-top">
               <span className="cl-idx">#{dispIdx+1}</span>
               <span className="cl-badge" style={{ background: tc.bg, color: tc.text, fontSize:10 }}>{tc.label}</span>
@@ -639,16 +710,15 @@ function ChangeList({ changes, annotations, onAnnotate, displayOrder }) {
               <span className="cl-arrow">→</span>
               <span className="cl-rep">{ch.replacement}</span>
             </div>
-            {!ann && (
-              <div className="cl-quick-btns">
-                {["O","X"].map(v => (
-                  <button key={v} className={`cl-quick-btn btn-${v.toLowerCase()}`}
-                    onClick={e => { e.stopPropagation(); onAnnotate(idx, v); }}>
-                    {v === "O" ? "⭕" : "❌"} {VERDICT_STYLES[v].label.slice(2)}
-                  </button>
-                ))}
-              </div>
-            )}
+            <div className="cl-quick-btns">
+              {["O","X"].map(v => (
+                <button key={v} className={`cl-quick-btn btn-${v.toLowerCase()}`}
+                  style={ann === v ? { background: VERDICT_STYLES[v].bg === "#dc2626" ? "#fef2f2" : "#ecfdf5", borderColor: VERDICT_STYLES[v].bg, fontWeight:700 } : {}}
+                  onClick={e => { e.stopPropagation(); onAnnotate(idx, v); }}>
+                  {v === "O" ? "⭕" : "❌"} {VERDICT_STYLES[v].label.slice(2)}
+                </button>
+              ))}
+            </div>
           </div>
         );
       })}
@@ -666,6 +736,7 @@ function App() {
   const [showExport, setShowExport] = useState(false);
   const [showContribution, setShowContribution] = useState(false);
   const [exportTab, setExportTab] = useState("annotations");
+  const [focusedChange, setFocusedChange] = useState(null);
   const [goldDone, setGoldDone] = useState({});  // { error: bool, representational: bool }
   const saveTimer = useRef(null);
 
@@ -748,6 +819,7 @@ function App() {
   const handleNavigate = (newIdx) => {
     addLog(logs, "navigate", { from: sampleIdx, to: newIdx });
     setSampleIdx(newIdx);
+    setFocusedChange(null);
   };
 
   /* ─ Getters ─ */
@@ -757,18 +829,20 @@ function App() {
   const category = sample?.perturbation_category || "error";
   const isEP = category === "error";
 
+  const getVisibleIndices = (s) => s._displayOrder || s.changes.map((_, i) => i);
+
   const sampleAnnotations = useMemo(() => {
     if (!sample) return {};
     const r = {};
-    sample.changes.forEach((_, ci) => { const v = annotations[getKey(sample, ci)]; if (v) r[ci] = v; });
+    const vis = new Set(getVisibleIndices(sample));
+    sample.changes.forEach((_, ci) => { if (vis.has(ci)) { const v = annotations[getKey(sample, ci)]; if (v) r[ci] = v; } });
     return r;
   }, [sample, sampleIdx, annotations]);
-
-  const totalChanges = data.reduce((s, d) => s + d.changes.length, 0);
-  const doneCount = Object.values(annotations).filter(Boolean).length;
-  const sampleDone = sample ? sample.changes.filter((_, ci) => annotations[getKey(sample, ci)]).length : 0;
+  const totalChanges = data.reduce((s, d) => s + getVisibleIndices(d).length, 0);
+  const doneCount = data.reduce((s, d) => s + getVisibleIndices(d).filter(ci => annotations[getKey(d, ci)]).length, 0);
+  const sampleDone = sample ? getVisibleIndices(sample).filter(ci => annotations[getKey(sample, ci)]).length : 0;
   const totalSamples = data.length;
-  const doneSamples = data.filter(s => s.changes.every((_, ci) => annotations[getKey(s, ci)])).length;
+  const doneSamples = data.filter(s => getVisibleIndices(s).every(ci => annotations[getKey(s, ci)])).length;
 
   /* ─ Export ─ */
   const buildExport = () => {
@@ -776,26 +850,31 @@ function App() {
       annotator_id: appData.annotatorId,
       completed_at: new Date().toISOString(),
       setting: "reference_free",
-      total_changes: totalChanges,
+      total_displayed: totalChanges,
       total_annotated: doneCount,
-      samples: data.map((s, si) => ({
-        sample_id: s.sample_id,
-        perturbation_category: s.perturbation_category,
-        perturbation_type: s.perturbation_type,
-        material: s.material,
-        process: s.process,
-        domain: s.domain,
-        annotations: s.changes.map((c, ci) => ({
-          change_idx: ci,
-          original: c.original,
-          replacement: c.replacement,
-          source_type: c.source_type,
-          lookup_source: c.lookup_source || null,
-          verdict: annotations[getKey(s, ci)] || null,
-          is_gold: c.is_gold || false,
-          is_decoy: c._isDecoy || false,
-        })),
-      })),
+      samples: data.map((s, si) => {
+        const visSet = new Set(getVisibleIndices(s));
+        return {
+          sample_id: s.sample_id,
+          perturbation_category: s.perturbation_category,
+          perturbation_type: s.perturbation_type,
+          material: s.material,
+          process: s.process,
+          domain: s.domain,
+          displayed_count: visSet.size,
+          annotations: s.changes.map((c, ci) => ({
+            change_idx: ci,
+            original: c.original,
+            replacement: c.replacement,
+            source_type: c.source_type,
+            lookup_source: c.lookup_source || null,
+            verdict: annotations[getKey(s, ci)] || null,
+            is_gold: c.is_gold || false,
+            is_decoy: c._isDecoy || false,
+            was_displayed: visSet.has(ci),
+          })),
+        };
+      }),
     };
     return JSON.stringify(result, null, 2);
   };
@@ -862,7 +941,7 @@ function App() {
           <span className="topbar-user">{appData.annotatorId}</span>
           <button className="topbar-btn secondary" onClick={() => { saveToDisk(appData.dataId, annotations, logs, appData.annotatorId); alert("저장 완료"); }}>저장</button>
           <button className="topbar-btn" onClick={() => {
-            const incompleteIdx = data.findIndex(s => s.changes.some((_, ci) => !annotations[getKey(s, ci)]));
+            const incompleteIdx = data.findIndex(s => getVisibleIndices(s).some(ci => !annotations[getKey(s, ci)]));
             if (incompleteIdx >= 0) {
               handleNavigate(incompleteIdx);
               alert(`미완료 샘플이 있습니다. (#${data[incompleteIdx].sample_id})`);
@@ -878,7 +957,7 @@ function App() {
         <span className="ctx-material" title={sample.material}>{sample.material}</span>
         <span className="ctx-tag">{sample.process}</span>
         <span className="ctx-tag" style={(()=>{ const dc = DOMAIN_COLORS[sample.domain] || DOMAIN_COLORS.Others; return {background:dc.bg,color:dc.text,border:`1px solid ${dc.border}`}; })()}>{sample.domain}</span>
-        <span className="ctx-changes"><strong>{sampleDone}</strong> / {sample.changes.length} annotated</span>
+        <span className="ctx-changes"><strong>{sampleDone}</strong> / {getVisibleIndices(sample).length} annotated</span>
         <button className={`ref-toggle ${showOriginal ? "active" : ""}`} onClick={() => setShowOriginal(!showOriginal)}>
           {showOriginal ? "원본 닫기" : "원본 레시피 보기"}
         </button>
@@ -890,8 +969,9 @@ function App() {
         <div className="sample-nav">
           <div className="nav-label">Samples</div>
           {data.map((s, i) => {
-            const d = s.changes.filter((_, ci) => annotations[getKey(s, ci)]).length;
-            const p = Math.round((d / s.changes.length) * 100);
+            const vis = getVisibleIndices(s);
+            const d = vis.filter(ci => annotations[getKey(s, ci)]).length;
+            const p = Math.round((d / vis.length) * 100);
             return (
               <div key={i} className={`nav-item ${i === sampleIdx ? "active" : ""}`} onClick={() => handleNavigate(i)}>
                 <div className="nav-item-top">
@@ -933,6 +1013,8 @@ function App() {
             changes={sample.changes}
             annotations={sampleAnnotations}
             onAnnotate={handleAnnotate}
+            focusedChange={focusedChange}
+            onFocusChange={setFocusedChange}
           />
         </div>
 
@@ -950,6 +1032,7 @@ function App() {
             annotations={sampleAnnotations}
             onAnnotate={handleAnnotate}
             displayOrder={sample._displayOrder}
+            onClickChange={setFocusedChange}
           />
         </div>
       </div>
