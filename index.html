@@ -280,9 +280,35 @@ function DataLoader({ onLoad }) {
       let data = typeof raw === "string" ? JSON.parse(raw) : raw;
       if (!Array.isArray(data) || data.length === 0) throw new Error("빈 배열");
       if (!data[0].segments || !data[0].changes) throw new Error("segments/changes 필드 없음");
-      // Filter out to_cas samples and changes
+      // Filter out to_cas: revert CAS numbers in text, then remove to_cas changes.
       data = data.filter(d => d.perturbation_type !== "llm_to_cas");
-      data.forEach(d => { d.changes = d.changes.filter(c => c.source_type !== "to_cas"); });
+      data.forEach(d => {
+        // Collect to_cas reverts and build chain map
+        const casReverts = []; // { cas, original, position }
+        d.changes.forEach((c, i) => {
+          c._preFilterIdx = i;
+          if (c.source_type === 'to_cas') {
+            casReverts.push({ cas: c.replacement, original: c.original, position: c.position || 0 });
+          }
+        });
+        // Revert CAS numbers in segment text (replace CAS → original term)
+        if (casReverts.length > 0) {
+          let fullText = d.segments.map(s => s.content).join('');
+          // Sort by position descending to avoid offset shifts
+          casReverts.sort((a, b) => b.position - a.position);
+          for (const rev of casReverts) {
+            // Search near the hint position first, then fall back to global indexOf
+            const searchStart = Math.max(0, rev.position - 50);
+            let idx = fullText.indexOf(rev.cas, searchStart);
+            if (idx < 0) idx = fullText.indexOf(rev.cas);
+            if (idx >= 0) {
+              fullText = fullText.slice(0, idx) + rev.original + fullText.slice(idx + rev.cas.length);
+            }
+          }
+          d.segments = [{ type: 'text', content: fullText }];
+        }
+        d.changes = d.changes.filter(c => c.source_type !== "to_cas");
+      });
       data = data.filter(d => d.changes.length > 0);
       data.forEach((d, i) => { d._origIdx = i; });
 
@@ -303,43 +329,63 @@ function DataLoader({ onLoad }) {
           return;
         }
 
+        // Build fallback map: for changes whose replacement text was overwritten,
+        // look up what the original segment data says the actual text content is.
+        // Segments use pre-filter indices; map them to post-filter _idx via _preFilterIdx.
+        const segByPreIdx = {}; // pre-filter change_idx → segment content
+        d.segments.forEach(seg => {
+          if (seg.type === 'change' && seg.change_idx != null) segByPreIdx[seg.change_idx] = seg.content;
+        });
+        const origSegContent = {}; // post-filter _idx → segment content
+        d.changes.forEach((ch, i) => {
+          if (ch._preFilterIdx != null && segByPreIdx[ch._preFilterIdx]) {
+            origSegContent[i] = segByPreIdx[ch._preFilterIdx];
+          }
+        });
+
         // Find ALL occurrences for each replacement, then greedily assign
         // each change to the best (closest to cursor) unused occurrence.
+        const findAllPositions = (needle) => {
+          const needleLower = needle.toLowerCase();
+          const positions = [];
+          let sf = 0;
+          while (true) {
+            const idx = fullText.indexOf(needle, sf);
+            if (idx >= 0) { positions.push({ pos: idx, len: needle.length, exact: true }); sf = idx + 1; }
+            else break;
+          }
+          sf = 0;
+          while (true) {
+            const idx = fullLower.indexOf(needleLower, sf);
+            if (idx >= 0) {
+              if (!positions.some(p => p.pos === idx)) positions.push({ pos: idx, len: needle.length, exact: false });
+              sf = idx + 1;
+            } else break;
+          }
+          return positions;
+        };
         const allOccurrences = []; // { start, end, changeIdx }
         const used = new Set(); // track used text positions
         for (const ch of sorted) {
           const rep = ch.replacement;
-          const repLower = rep.toLowerCase();
-          // Collect all positions of this replacement in text
-          const positions = [];
-          let searchFrom = 0;
-          while (true) {
-            let idx = fullText.indexOf(rep, searchFrom);
-            if (idx >= 0) { positions.push({ pos: idx, exact: true }); searchFrom = idx + 1; continue; }
-            break;
-          }
-          // Also case-insensitive positions
-          searchFrom = 0;
-          while (true) {
-            let idx = fullLower.indexOf(repLower, searchFrom);
-            if (idx >= 0) {
-              if (!positions.some(p => p.pos === idx)) positions.push({ pos: idx, exact: false });
-              searchFrom = idx + 1; continue;
-            }
-            break;
+          // Try: direct match → original segment content fallback
+          let candidates = findAllPositions(rep);
+          if (candidates.length === 0) {
+            const segContent = origSegContent[ch._idx];
+            if (segContent && segContent !== rep) candidates = findAllPositions(segContent);
           }
           // Pick the best unused position (prefer exact, closest to position hint)
-          positions.sort((a, b) => {
+          candidates.sort((a, b) => {
             if (a.exact !== b.exact) return a.exact ? -1 : 1;
             return Math.abs(a.pos - (ch.position || 0)) - Math.abs(b.pos - (ch.position || 0));
           });
           let picked = null;
-          for (const p of positions) {
-            const key = `${p.pos}-${p.pos + rep.length}`;
+          for (const p of candidates) {
+            const key = `${p.pos}-${p.pos + p.len}`;
             if (!used.has(key)) { picked = p; used.add(key); break; }
           }
           if (picked != null) {
-            allOccurrences.push({ start: picked.pos, end: picked.pos + rep.length, changeIdx: ch._idx });
+            allOccurrences.push({ start: picked.pos, end: picked.pos + picked.len, changeIdx: ch._idx });
           }
         }
 
@@ -452,13 +498,14 @@ function DataLoader({ onLoad }) {
       .catch(e => { setErr("URL 로드 실패: " + e.message); setLoading(false); });
   };
 
-  const handleStart = (resumeSaved) => {
-    if (!loadedData || !name.trim()) return;
+  const handleStart = (resumeSaved, nameOverride) => {
+    const effectiveName = (nameOverride || name).trim();
+    if (!loadedData || !effectiveName) return;
     const dataId = getDataId(loadedData);
     const saved = resumeSaved && savedInfo ? savedInfo : null;
     onLoad({
-      data: seededShuffle(loadedData, name.trim()),
-      annotatorId: name.trim(),
+      data: seededShuffle(loadedData, effectiveName),
+      annotatorId: effectiveName,
       dataId,
       resumeAnnotations: saved ? saved.annotations : {},
       resumeLogs: saved ? saved.logs : [],
@@ -517,7 +564,7 @@ function DataLoader({ onLoad }) {
           <div className="loader-resume">
             <strong>이전 작업 발견</strong> — {savedInfo.annotatorId}, {savedInfo.count}개 완료 ({savedInfo.savedAt?.slice(0,16)})
             <br/>
-            <button onClick={() => { setName(savedInfo.annotatorId || name); handleStart(true); }}>이어서 하기</button>
+            <button onClick={() => { const n = savedInfo.annotatorId || name; setName(n); handleStart(true, n); }}>이어서 하기</button>
           </div>
         )}
 
@@ -532,7 +579,9 @@ function DataLoader({ onLoad }) {
 /* ─── Gold Tutorial ─── */
 function GoldTutorial({ goldItems, onComplete }) {
   const [idx, setIdx] = useState(0);
-  if (!goldItems || goldItems.length === 0) { onComplete(); return null; }
+  const empty = !goldItems || goldItems.length === 0;
+  useEffect(() => { if (empty) onComplete(); }, [empty, onComplete]);
+  if (empty) return null;
   const item = goldItems[idx];
   return (
     <div className="gold-bg">
@@ -745,16 +794,14 @@ function App() {
     setAppData(info);
     setAnnotations(info.resumeAnnotations || {});
     setLogs(info.resumeLogs || []);
-    addLog(info.resumeLogs || [], "session_start", {}, info);
+    addLog("session_start", {});
   };
 
   /* ─ Logging ─ */
-  const addLog = (currentLogs, type, detail, infoOverride) => {
+  const addLog = useCallback((type, detail) => {
     const entry = { timestamp: new Date().toISOString(), type, ...detail };
-    const next = [...(currentLogs || logs), entry];
-    setLogs(next);
-    return next;
-  };
+    setLogs(prev => [...prev, entry]);
+  }, []);
 
   /* ─ Auto-save ─ */
   useEffect(() => {
@@ -785,16 +832,18 @@ function App() {
       }
       if (e.key === "ArrowRight" || e.key === "ArrowDown") {
         e.preventDefault();
-        setSampleIdx(prev => Math.min(prev + 1, appData.data.length - 1));
+        const next = Math.min(sampleIdx + 1, appData.data.length - 1);
+        if (next !== sampleIdx) handleNavigate(next);
       }
       if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
         e.preventDefault();
-        setSampleIdx(prev => Math.max(prev - 1, 0));
+        const prev = Math.max(sampleIdx - 1, 0);
+        if (prev !== sampleIdx) handleNavigate(prev);
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [appData, sampleIdx, annotations]);
+  }, [appData, sampleIdx, annotations, handleNavigate]);
 
   /* ─ Annotation handler ─ */
   const handleAnnotate = (ci, val) => {
@@ -803,7 +852,7 @@ function App() {
     const prev = annotations[key];
     const next = prev === val ? undefined : val;
     setAnnotations(a => ({ ...a, [key]: next }));
-    const newLog = addLog(logs, "annotate", {
+    addLog("annotate", {
       sample_idx: sampleIdx,
       sample_id: sample.sample_id,
       change_idx: ci,
@@ -813,14 +862,13 @@ function App() {
       verdict: next || "cleared",
       prev_verdict: prev || null,
     });
-    setLogs(newLog);
   };
 
-  const handleNavigate = (newIdx) => {
-    addLog(logs, "navigate", { from: sampleIdx, to: newIdx });
+  const handleNavigate = useCallback((newIdx) => {
+    addLog("navigate", { from: sampleIdx, to: newIdx });
     setSampleIdx(newIdx);
     setFocusedChange(null);
-  };
+  }, [sampleIdx, addLog]);
 
   /* ─ Getters ─ */
   const data = appData?.data || [];
@@ -946,7 +994,7 @@ function App() {
               handleNavigate(incompleteIdx);
               alert(`미완료 샘플이 있습니다. (#${data[incompleteIdx].sample_id})`);
             } else {
-              addLog(logs, "export_open", {}); setShowExport(true);
+              addLog("export_open", {}); setShowExport(true);
             }
           }}>Export</button>
         </div>
